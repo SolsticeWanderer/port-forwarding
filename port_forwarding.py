@@ -1,63 +1,83 @@
 import socket
 import sqlite3
-import thread
+import threading
 
 
-class port_forwarding:
-    """using in port_forwarding"""
+class PortForwarding:
+    """Class for setting up port forwarding based on database configurations."""
+
     def __init__(self, setup, error):
-        for settings in self.fetch_db():
-            thread.start_new_thread(self.server, settings)
-        lock = thread.allocate_lock()
-        lock.acquire()
-        lock.acquire()
+        self.setup = setup
+        self.error = error
+        self.lock = threading.Lock()
+
+        # Fetch port forwarding settings from the database
+        settings = self.fetch_db()
+
+        # Start a new thread for each forwarding rule
+        for setting in settings:
+            thread = threading.Thread(target=self.server, args=setting)
+            thread.daemon = True  # Daemon threads will shut down when the program exits
+            thread.start()
+
+        # Block the main thread to keep the program running
+        self.lock.acquire()
 
     def fetch_db(self):
+        """Fetch port forwarding rules from the database."""
         con = sqlite3.connect("./test.db")
         cur = con.cursor()
-        cur.execute("select ip, port, listen_port from test")
+        cur.execute("SELECT ip, port, listen_port FROM test")
         data = cur.fetchall()
+        con.close()
         return data
 
     def parse(self, setup):
-        settings = list()
-        for line in file(setup):
-            parts = line.split()
-            settings.append((parts[0], int(parts[1]), int(parts[2])))
+        """Parse the configuration file for port forwarding rules."""
+        settings = []
+        with open(setup, 'r') as f:
+            for line in f:
+                parts = line.split()
+                settings.append((parts[0], int(parts[1]), int(parts[2])))
         return settings
 
-    def server(self, *settings):
+    def server(self, ip, port, listen_port):
+        """Set up the server to listen on the specified port and forward traffic."""
         try:
-            ip = str(settings[0])
-            port = int(settings[1])
-            listen_port = int(settings[2])
             dock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             dock_socket.bind(('', listen_port))
             dock_socket.listen(5)
+            print(f"Listening on port {listen_port}...")
+
             while True:
                 client_socket, address = dock_socket.accept()
-                print "clinet %s -> from port:%s -> to:%s:%s" % \
-                (str(address).strip(), listen_port, ip, port)
+                print(f"Client {address} connected -> forwarding to {ip}:{port}")
                 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 server_socket.connect((ip, port))
-                thread.start_new_thread(self.forward, (client_socket, server_socket))
-                thread.start_new_thread(self.forward, (server_socket, client_socket))
+
+                # Start threads to handle the forwarding
+                threading.Thread(target=self.forward, args=(client_socket, server_socket)).start()
+                threading.Thread(target=self.forward, args=(server_socket, client_socket)).start()
+
+        except Exception as e:
+            print(f"Error: {e}")
         finally:
-            thread.start_new_thread(self.server, settings)
+            dock_socket.close()
 
     def forward(self, source, destination):
-        string = ' '
-        while string:
-            string = source.recv(1024)
-            if string:
-                destination.sendall(string)
-            else:
-                try:
-                    source.shutdown(socket.SHUT_RDWR)
-                    destination.shutdown(socket.SHUT_RDWR)
-                except socket.error, e:
-                    print "E:" + str(e)
+        """Forward data between source and destination sockets."""
+        try:
+            while True:
+                data = source.recv(1024)
+                if not data:
+                    break
+                destination.sendall(data)
+        except Exception as e:
+            print(f"Forwarding error: {e}")
+        finally:
+            source.close()
+            destination.close()
 
 
 if __name__ == '__main__':
-    demon = port_forwarding('proxy.ini', 'error.log')
+    demon = PortForwarding('proxy.ini', 'error.log')
